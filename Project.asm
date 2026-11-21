@@ -34,6 +34,7 @@ START_TIME equ 300
 MAX_ENEMIES equ 8
 MAX_SCORE equ 999999
 LEVEL_WIDTH equ 60
+
 ; Level map constants
 MAP_COLUMNS equ 60
 MAP_ROWS equ 12
@@ -58,17 +59,16 @@ TILE_FLAG equ 12
 start:
     mov ax, 0013h
     int 10h
-    
-    ; Temporary test tile at row 10, column 0
+
     ; Restore working map from original map
     call ResetMap
 
     ; GetTile test: px = 8, py = 168
     mov ax, 168
-    push ax              ; py
+    push ax
 
     mov ax, 8
-    push ax              ; px
+    push ax
 
     call GetTile
     add sp, 4
@@ -76,28 +76,26 @@ start:
     ; Save returned tile code
     mov [test_tile], al
 
-    ; Check whether the returned tile is ground
+    ; Check whether returned tile is ground
     cmp ax, TILE_GROUND
     jne .wrong_tile
 
-    ; Green rectangle means correct
     mov ax, COLOR_PIPE
     jmp .draw_result
 
 .wrong_tile:
-    ; Red rectangle means incorrect
     mov ax, COLOR_BRICK
 
 .draw_result:
-    push ax              ; Colour
+    push ax
     mov ax, 12
-    push ax              ; Height
+    push ax
     mov ax, 20
-    push ax              ; Width
+    push ax
     mov ax, 150
-    push ax              ; Y
+    push ax
     mov ax, 150
-    push ax              ; X
+    push ax
 
     call FillRect
     add sp, 10
@@ -214,6 +212,61 @@ start:
     call FillRect
     add sp, 10
 
+    ; Draw a ground tile
+    mov ax, TILE_GROUND
+    push ax
+    mov ax, 130
+    push ax
+    mov ax, 30
+    push ax
+    call DrawTile
+    add sp, 6
+
+    ; Draw a brick tile
+    mov ax, TILE_BRICK
+    push ax
+    mov ax, 130
+    push ax
+    mov ax, 50
+    push ax
+    call DrawTile
+    add sp, 6
+
+    ; Draw a question block
+    mov ax, TILE_QUESTION_COIN
+    push ax
+    mov ax, 130
+    push ax
+    mov ax, 70
+    push ax
+    call DrawTile
+    add sp, 6
+
+    ; Draw a pipe tile
+    mov ax, TILE_PIPE_TOP_LEFT
+    push ax
+    mov ax, 130
+    push ax
+    mov ax, 90
+    push ax
+    call DrawTile
+    add sp, 6
+
+    ; Draw a coin tile
+    mov ax, TILE_COIN
+    push ax
+    mov ax, 130
+    push ax
+    mov ax, 110
+    push ax
+    call DrawTile
+    add sp, 6
+
+    ; Draw the middle 20 columns
+    push word 20
+    call DrawMap
+    add sp, 2
+
     ; Wait for a key
     mov ah, 00h
     int 16h
@@ -246,6 +299,7 @@ game_time dw START_TIME
 ; Keyboard variables
 key_states times 128 db 0
 test_tile db 0
+
 
 ; Original level map
 ; Each row contains exactly 60 tiles.
@@ -354,13 +408,11 @@ level_map_working:
     times MAP_SIZE db TILE_SKY
 
 
-
 ; Procedure: PutPixel
 ; Purpose: Draw one pixel on the VGA screen.
 ; Inputs: x at [BP+4], y at [BP+6], colour at [BP+8].
-; Outputs: One pixel is written to video memory.
-; Registers changed internally: AX, BX, DI, ES.
-; All registers used are restored before returning.
+; Output: One pixel is written to video memory.
+; All registers used are restored.
 
 PutPixel:
     push bp
@@ -409,11 +461,10 @@ PutPixel:
 
 
 ; Procedure: FillRect
-; Purpose: Draw a filled rectangle using PutPixel.
+; Purpose: Draw a filled rectangle directly into VGA memory.
 ; Inputs: x, y, width, height, colour through the stack.
 ; Output: A filled rectangle on the VGA screen.
-; Registers changed internally: AX, BX, CX, DX, SI, DI.
-; All registers used are restored before returning.
+; All registers and flags are restored.
 
 FillRect:
     push bp
@@ -425,47 +476,66 @@ FillRect:
     push dx
     push si
     push di
+    push es
+    pushf
 
-    ; Height controls the outer loop
-    mov dx, [bp+10]
-    mov si, 0
-
-.outer:
-    cmp si, dx
+    ; Check starting position
+    cmp word [bp+4], SCREEN_WIDTH
     jae .done
 
-    ; Width controls the inner loop
-    mov cx, [bp+8]
-    mov di, 0
+    cmp word [bp+6], SCREEN_HEIGHT
+    jae .done
 
-.inner:
-    cmp di, cx
-    jae .next_row
+    ; Clip width to screen boundary
+    mov si, [bp+8]
+    mov ax, SCREEN_WIDTH
+    sub ax, [bp+4]
+    cmp si, ax
+    jbe .width_ok
+    mov si, ax
 
-    ; Calculate current x position
-    mov ax, [bp+4]
-    add ax, di
+.width_ok:
+    ; Clip height to screen boundary
+    mov dx, [bp+10]
+    mov ax, SCREEN_HEIGHT
+    sub ax, [bp+6]
+    cmp dx, ax
+    jbe .height_ok
+    mov dx, ax
 
-    ; Calculate current y position
+.height_ok:
+    ; Select VGA memory
+    mov ax, 0A000h
+    mov es, ax
+
     mov bx, [bp+6]
-    add bx, si
 
-    ; Pass colour, y and x to PutPixel
-    push word [bp+12]
-    push bx
-    push ax
+.row_loop:
+    cmp dx, 0
+    je .done
 
-    call PutPixel
-    add sp, 6
+    ; Calculate video memory offset: y * 320 + x
+    mov ax, bx
+    mov di, ax
+    shl ax, 8
+    shl di, 6
+    add ax, di
+    add ax, [bp+4]
+    mov di, ax
 
-    inc di
-    jmp .inner
+    ; Draw one complete row
+    mov cx, si
+    mov al, [bp+12]
+    cld
+    rep stosb
 
-.next_row:
-    inc si
-    jmp .outer
+    inc bx
+    dec dx
+    jmp .row_loop
 
 .done:
+    popf
+    pop es
     pop di
     pop si
     pop dx
@@ -476,14 +546,11 @@ FillRect:
     ret
 
 
-
-
 ; Procedure: GetTile
 ; Purpose: Find the tile code at a pixel position.
 ; Inputs: px at [BP+4], py at [BP+6].
 ; Output: Tile code returned in AX.
-; Registers changed internally: AX, BX, DX, SI.
-; All registers except the return register AX are restored.
+; All registers except AX are restored.
 
 GetTile:
     push bp
@@ -535,13 +602,10 @@ GetTile:
     ret
 
 
-
-
 ; Procedure: ResetMap
 ; Purpose: Copy the original level map into the working map.
 ; Inputs: None.
 ; Output: Working map is restored to its original contents.
-; Registers changed internally: CX, SI, DI, ES.
 ; All registers and flags are restored.
 
 ResetMap:
@@ -574,4 +638,220 @@ ResetMap:
     pop di
     pop si
     pop cx
+    ret
+
+
+; Procedure: DrawTile
+; Purpose: Draw one 16x16 tile according to its tile code.
+; Inputs: x at [BP+4], y at [BP+6], tile code at [BP+8].
+; Output: One coloured tile is drawn on the screen.
+; All registers are restored.
+
+DrawTile:
+    push bp
+    mov bp, sp
+
+    push ax
+
+    ; Sky tile
+    cmp word [bp+8], TILE_SKY
+    je .sky
+
+    ; Ground tile
+    cmp word [bp+8], TILE_GROUND
+    je .ground
+
+    ; Brick tile
+    cmp word [bp+8], TILE_BRICK
+    je .brick
+
+    ; Question blocks
+    cmp word [bp+8], TILE_QUESTION_COIN
+    je .question
+
+    cmp word [bp+8], TILE_QUESTION_MUSHROOM
+    je .question
+
+    ; Empty block
+    cmp word [bp+8], TILE_EMPTY_BLOCK
+    je .empty
+
+    ; Pipe tiles
+    cmp word [bp+8], TILE_PIPE_TOP_LEFT
+    je .pipe
+
+    cmp word [bp+8], TILE_PIPE_TOP_RIGHT
+    je .pipe
+
+    cmp word [bp+8], TILE_PIPE_BODY_LEFT
+    je .pipe
+
+    cmp word [bp+8], TILE_PIPE_BODY_RIGHT
+    je .pipe
+
+    ; Stair tile
+    cmp word [bp+8], TILE_STAIR
+    je .ground
+
+    ; Coin tile
+    cmp word [bp+8], TILE_COIN
+    je .question
+
+    ; Flag tile
+    cmp word [bp+8], TILE_FLAG
+    je .flag
+
+    ; Unknown tile: draw sky
+    jmp .sky
+
+.sky:
+    mov ax, COLOR_SKY
+    jmp .draw
+
+.ground:
+    mov ax, COLOR_GROUND
+    jmp .draw
+
+.brick:
+    mov ax, COLOR_BRICK
+    jmp .draw
+
+.question:
+    mov ax, COLOR_ENEMY
+    jmp .draw
+
+.empty:
+    mov ax, COLOR_HUD
+    jmp .draw
+
+.pipe:
+    mov ax, COLOR_PIPE
+    jmp .draw
+
+.flag:
+    mov ax, COLOR_TEXT
+
+.draw:
+    ; Pass colour, height, width, y and x
+    push ax
+    push word 16
+    push word 16
+    push word [bp+6]
+    push word [bp+4]
+
+    call FillRect
+    add sp, 10
+
+    pop ax
+    pop bp
+    ret
+
+
+; Procedure: DrawMap
+; Purpose: Draw 20 columns of the level map.
+; Input: Starting column at [BP+4].
+; Output: Visible map section is drawn on screen.
+; All registers are restored.
+
+DrawMap:
+    push bp
+    mov bp, sp
+
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+
+    ; Reserve space for local variables
+    sub sp, 6
+
+    ; [BP-14] = row
+    ; [BP-16] = screen column
+
+    mov word [bp-14], 0
+
+.row_loop:
+
+    ; Check whether all 12 rows are drawn
+    cmp word [bp-14], MAP_ROWS
+    jae .done
+
+    mov word [bp-16], 0
+
+.column_loop:
+
+    ; Check whether 20 columns are drawn
+    cmp word [bp-16], 20
+    jae .next_row
+
+    ; Calculate world column
+    mov ax, [bp+4]
+    add ax, [bp-16]
+
+    ; Check level boundary
+    cmp ax, MAP_COLUMNS
+    jae .sky_tile
+
+    mov bx, ax
+
+    ; Calculate row * 60
+    mov ax, [bp-14]
+    mov dx, MAP_COLUMNS
+    mul dx
+
+    ; Calculate map index
+    add ax, bx
+    mov si, ax
+
+    ; Read tile code
+    xor ax, ax
+    mov al, [level_map_working + si]
+    jmp .draw_tile
+
+.sky_tile:
+    mov ax, TILE_SKY
+
+.draw_tile:
+
+    ; Calculate screen Y = row * 16
+    mov bx, [bp-14]
+    shl bx, 4
+
+    ; Calculate screen X = screen column * 16
+    mov cx, [bp-16]
+    shl cx, 4
+
+    ; Pass tile code, Y and X
+    push ax
+    push bx
+    push cx
+
+    call DrawTile
+    add sp, 6
+
+    ; Move to next column
+    inc word [bp-16]
+    jmp .column_loop
+
+.next_row:
+
+    ; Move to next row
+    inc word [bp-14]
+    jmp .row_loop
+
+.done:
+
+    ; Remove only the local variables
+    add sp, 6
+
+    ; Restore saved registers
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    pop bp
     ret
