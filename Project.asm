@@ -1,4 +1,3 @@
-
 bits 16
 org 100h
 
@@ -55,16 +54,18 @@ TILE_STAIR equ 10
 TILE_COIN equ 11
 TILE_FLAG equ 12
 
+HERO_SPEED equ 512
+GRAVITY equ 64
+JUMP_SPEED equ -1024
+HERO_MAX_X_FP equ 242688
 
 start:
-    ; Set program segment and stack
     mov ax, cs
     mov ds, ax
     mov es, ax
     mov ss, ax
     mov sp, program_end + 2048
 
-    ; Reduce program memory block
     mov bx, program_end
     add bx, 2063
     shr bx, 4
@@ -73,42 +74,30 @@ start:
     int 21h
     jc memory_error_exit
 
-    ; Allocate 4000 paragraphs = 64000 bytes
     mov bx, 4000
     mov ah, 48h
     int 21h
     jc memory_error_exit
 
-    ; Save allocated framebuffer segment
     mov [framebuffer_segment], ax
 
-    ; Set graphics mode
     mov ax, 0013h
     int 10h
 
-    ; Install our keyboard interrupt
     call InstallKeyboard
-
-    ; Clear framebuffer
+    call InstallTimer
     call ClearBuffer
-
-    ; Restore working map
     call ResetMap
 
-    ; GetTile test: px = 8, py = 168
     mov ax, 168
     push ax
-
     mov ax, 8
     push ax
-
     call GetTile
     add sp, 4
 
-    ; Save returned tile code
     mov [test_tile], al
 
-    ; Check whether returned tile is ground
     cmp ax, TILE_GROUND
     jne .wrong_tile
 
@@ -128,11 +117,9 @@ start:
     push ax
     mov ax, 150
     push ax
-
     call FillRect
     add sp, 10
 
-    ; Rectangle 1: Sky
     mov ax, COLOR_SKY
     push ax
     mov ax, 14
@@ -143,11 +130,9 @@ start:
     push ax
     mov ax, 30
     push ax
-
     call FillRect
     add sp, 10
 
-    ; Rectangle 2: Ground
     mov ax, COLOR_GROUND
     push ax
     mov ax, 14
@@ -158,11 +143,9 @@ start:
     push ax
     mov ax, 180
     push ax
-
     call FillRect
     add sp, 10
 
-    ; Rectangle 3: Brick
     mov ax, COLOR_BRICK
     push ax
     mov ax, 14
@@ -173,11 +156,9 @@ start:
     push ax
     mov ax, 30
     push ax
-
     call FillRect
     add sp, 10
 
-    ; Rectangle 4: Pipe
     mov ax, COLOR_PIPE
     push ax
     mov ax, 14
@@ -188,11 +169,9 @@ start:
     push ax
     mov ax, 180
     push ax
-
     call FillRect
     add sp, 10
 
-    ; Rectangle 5: Hero
     mov ax, COLOR_HERO
     push ax
     mov ax, 14
@@ -203,11 +182,9 @@ start:
     push ax
     mov ax, 30
     push ax
-
     call FillRect
     add sp, 10
 
-    ; Rectangle 6: Enemy
     mov ax, COLOR_ENEMY
     push ax
     mov ax, 14
@@ -218,11 +195,9 @@ start:
     push ax
     mov ax, 180
     push ax
-
     call FillRect
     add sp, 10
 
-    ; Rectangle 7: Text
     mov ax, COLOR_TEXT
     push ax
     mov ax, 14
@@ -233,11 +208,9 @@ start:
     push ax
     mov ax, 30
     push ax
-
     call FillRect
     add sp, 10
 
-    ; Rectangle 8: HUD
     mov ax, COLOR_HUD
     push ax
     mov ax, 14
@@ -248,187 +221,190 @@ start:
     push ax
     mov ax, 180
     push ax
-
     call FillRect
     add sp, 10
 
-    ; Draw a ground tile
     mov ax, TILE_GROUND
     push ax
     mov ax, 130
     push ax
     mov ax, 30
     push ax
-
     call DrawTile
     add sp, 6
 
-    ; Draw a brick tile
     mov ax, TILE_BRICK
     push ax
     mov ax, 130
     push ax
     mov ax, 50
     push ax
-
     call DrawTile
     add sp, 6
 
-    ; Draw a question block
     mov ax, TILE_QUESTION_COIN
     push ax
     mov ax, 130
     push ax
     mov ax, 70
     push ax
-
     call DrawTile
     add sp, 6
 
-    ; Draw a pipe tile
     mov ax, TILE_PIPE_TOP_LEFT
     push ax
     mov ax, 130
     push ax
     mov ax, 90
     push ax
-
     call DrawTile
     add sp, 6
 
-    ; Draw a coin tile
     mov ax, TILE_COIN
     push ax
     mov ax, 130
     push ax
     mov ax, 110
     push ax
-
     call DrawTile
     add sp, 6
 
-    ; Update camera
     push word [camera_x]
     push word [hero_x]
-
     call UpdateCamera
     add sp, 4
-
-    ; Save new camera position
     mov [camera_x], ax
 
-    ; Get starting map column and pixel offset
     mov ax, [camera_x]
     mov dx, ax
     and dx, 000Fh
     shr ax, 4
 
-    ; Pass pixel offset and starting column
     push dx
     push ax
-
     call DrawMap
     add sp, 4
 
-    ; Present framebuffer on VGA screen
     call FramePresent
 
-    ; Wait until any key is pressed
-    mov byte [key_event], 0
+.game_loop:
+    call ReadKeyboard
 
-    .wait_for_key:
-    cmp byte [key_event], 1
-    jne .wait_for_key
+    cmp byte [exit_requested], 1
+    je .exit_game
 
-    ; Restore original keyboard interrupt
+    mov ax, [timer_ticks]
+    cmp ax, [last_timer_ticks]
+    je .game_loop
+
+    mov [last_timer_ticks], ax
+
+    call UpdatePhysics
+    call RenderFrame
+
+    jmp .game_loop
+
+.exit_game:
+    call RestoreTimer
     call RestoreKeyboard
 
-    ; Restore text mode
     mov ax, 0003h
     int 10h
 
-    ; Free framebuffer memory
     mov ax, [framebuffer_segment]
     mov es, ax
     mov ah, 49h
     int 21h
 
-    ; Exit to DOS
     mov ax, 4C00h
     int 21h
 
 
 memory_error_exit:
-    ; Return to text mode
     mov ax, 0003h
     int 10h
 
-    ; Display memory allocation error
     mov dx, memory_error
     mov ah, 09h
     int 21h
 
-    ; Exit with error code
     mov ax, 4C01h
     int 21h
 
 
 ; Hero variables
 hero_x dw 200
-hero_y dw 0
+hero_y dw 144
 hero_hp db 1
 
-; Camera variables
+hero_x_fp dd 51200
+hero_y_fp dw 36864
+
+hero_vx dw 0
+hero_vy dw 0
+
+hero_on_ground db 1
+hero_facing db 1
+jump_was_down db 0
+mario_pixel_color dw 0
+
+; Mario pixel-art sprite
+mario_sprite:
+    db 0,0,4,4,4,4,0,0
+    db 0,4,4,4,4,4,4,0
+    db 6,6,14,14,14,14,6,6
+    db 6,14,14,14,14,14,14,6
+    db 0,0,4,4,4,4,0,0
+    db 0,4,4,4,4,4,4,0
+    db 0,1,1,0,0,1,1,0
+    db 6,6,6,0,0,6,6,6
+
 camera_x dw 0
 
-; Enemy variables
 enemy_count db 0
 
-; Score variables
 score dd 0
 coins dw 0
 lives db START_LIVES
 
-; Clock variables
 game_time dw START_TIME
 
-; Keyboard variables
 key_states times 128 db 0
 key_event db 0
 keyboard_installed db 0
 
-; Original keyboard interrupt address
 old_int9_offset dw 0
 old_int9_segment dw 0
 
+timer_ticks dw 0
+last_timer_ticks dw 0
+timer_installed db 0
+
+old_int8_offset dw 0
+old_int8_segment dw 0
+
+input_left db 0
+input_right db 0
+input_jump db 0
+exit_requested db 0
+
 test_tile db 0
 
-; Framebuffer segment
 framebuffer_segment dw 0
 
-; Memory error message
 memory_error db 'Not enough memory for framebuffer.$'
 
 
 ; Original level map
-; 60 columns x 12 rows = 720 bytes
-
 level_map_original:
 
-    ; Row 0: HUD
+    times 60 db TILE_SKY
+    times 60 db TILE_SKY
     times 60 db TILE_SKY
 
-    ; Row 1: Sky
-    times 60 db TILE_SKY
-
-    ; Row 2: Sky
-    times 60 db TILE_SKY
-
-    ; Row 3: Flag pole
     times 59 db TILE_SKY
     db TILE_FLAG
 
-    ; Row 4: Ten free coins and flag pole
     times 21 db TILE_SKY
     times 5 db TILE_COIN
     times 15 db TILE_SKY
@@ -436,7 +412,6 @@ level_map_original:
     times 13 db TILE_SKY
     db TILE_FLAG
 
-    ; Row 5: Question blocks and brick
     times 7 db TILE_SKY
     db TILE_QUESTION_COIN
     times 5 db TILE_SKY
@@ -451,7 +426,6 @@ level_map_original:
     db TILE_BRICK
     db TILE_FLAG
 
-    ; Row 6: Brick groups and stairs
     times 8 db TILE_SKY
     times 3 db TILE_BRICK
     times 18 db TILE_SKY
@@ -461,7 +435,6 @@ level_map_original:
     db TILE_SKY
     db TILE_FLAG
 
-    ; Row 7: Pipe and stairs
     times 43 db TILE_SKY
     db TILE_PIPE_TOP_LEFT
     db TILE_PIPE_TOP_RIGHT
@@ -470,7 +443,6 @@ level_map_original:
     times 3 db TILE_SKY
     db TILE_FLAG
 
-    ; Row 8: Pipes and stairs
     times 23 db TILE_SKY
     db TILE_PIPE_TOP_LEFT
     db TILE_PIPE_TOP_RIGHT
@@ -482,7 +454,6 @@ level_map_original:
     times 5 db TILE_SKY
     db TILE_FLAG
 
-    ; Row 9: Pipe bodies and stairs
     times 23 db TILE_SKY
     db TILE_PIPE_BODY_LEFT
     db TILE_PIPE_BODY_RIGHT
@@ -494,14 +465,12 @@ level_map_original:
     times 7 db TILE_SKY
     db TILE_FLAG
 
-    ; Row 10: Ground with two pits
     times 17 db TILE_GROUND
     times 3 db TILE_SKY
     times 16 db TILE_GROUND
     times 4 db TILE_SKY
     times 20 db TILE_GROUND
 
-    ; Row 11: Ground with two pits
     times 17 db TILE_GROUND
     times 3 db TILE_SKY
     times 16 db TILE_GROUND
@@ -509,14 +478,11 @@ level_map_original:
     times 20 db TILE_GROUND
 
 
-; Working level map
 level_map_working:
     times MAP_SIZE db TILE_SKY
 
 
-; Procedure: ClearBuffer
-; Fill framebuffer with sky colour.
-
+; Clear framebuffer
 ClearBuffer:
     push ax
     push cx
@@ -542,9 +508,7 @@ ClearBuffer:
     ret
 
 
-; Procedure: FramePresent
-; Copy framebuffer to VGA memory.
-
+; Copy framebuffer to VGA memory
 FramePresent:
     push ax
     push cx
@@ -554,11 +518,9 @@ FramePresent:
     push es
     pushf
 
-    ; Source: framebuffer
     mov ax, [framebuffer_segment]
     mov ds, ax
 
-    ; Destination: VGA memory
     mov ax, 0A000h
     mov es, ax
 
@@ -579,9 +541,7 @@ FramePresent:
     ret
 
 
-; Procedure: PutPixel
-; Inputs: x [BP+4], y [BP+6], colour [BP+8].
-
+; Draw one pixel
 PutPixel:
     push bp
     mov bp, sp
@@ -591,14 +551,12 @@ PutPixel:
     push di
     push es
 
-    ; Check screen boundaries
     cmp word [bp+4], SCREEN_WIDTH
     jae .done
 
     cmp word [bp+6], SCREEN_HEIGHT
     jae .done
 
-    ; Calculate y * 320
     mov ax, [bp+6]
     mov bx, ax
 
@@ -606,16 +564,12 @@ PutPixel:
     shl bx, 6
 
     add ax, bx
-
-    ; Add x
     add ax, [bp+4]
     mov di, ax
 
-    ; Select framebuffer
     mov ax, [framebuffer_segment]
     mov es, ax
 
-    ; Write pixel
     mov al, [bp+8]
     mov [es:di], al
 
@@ -628,14 +582,7 @@ PutPixel:
     ret
 
 
-; Procedure: FillRect
-; Inputs:
-; x      [BP+4]
-; y      [BP+6]
-; width  [BP+8]
-; height [BP+10]
-; colour [BP+12]
-
+; Draw rectangle
 FillRect:
     push bp
     mov bp, sp
@@ -649,47 +596,36 @@ FillRect:
     push es
     pushf
 
-    ; Get original width
     mov si, [bp+8]
 
-    ; Clip left edge
     mov ax, [bp+4]
     test ax, 8000h
     jz .check_right
 
-    ; X is negative
     neg ax
-
-    ; Check if rectangle is completely outside
     cmp si, ax
     jbe .done
 
-    ; Reduce width and set X to zero
     sub si, ax
     mov word [bp+4], 0
     jmp .check_height
 
 .check_right:
-    ; Check right boundary
     cmp ax, SCREEN_WIDTH
     jae .done
 
-    ; Calculate available width
     mov dx, SCREEN_WIDTH
     sub dx, ax
 
     cmp si, dx
     jbe .check_height
 
-    ; Clip width
     mov si, dx
 
 .check_height:
-    ; Check top boundary
     cmp word [bp+6], SCREEN_HEIGHT
     jae .done
 
-    ; Clip height at bottom
     mov dx, [bp+10]
     mov ax, SCREEN_HEIGHT
     sub ax, [bp+6]
@@ -700,25 +636,21 @@ FillRect:
     mov dx, ax
 
 .height_ok:
-    ; Check zero dimensions
     cmp si, 0
     je .done
 
     cmp dx, 0
     je .done
 
-    ; Select framebuffer
     mov ax, [framebuffer_segment]
     mov es, ax
 
-    ; Starting Y position
     mov bx, [bp+6]
 
 .row_loop:
     cmp dx, 0
     je .done
 
-    ; Calculate offset = Y * 320 + X
     mov ax, bx
     mov di, ax
 
@@ -730,14 +662,12 @@ FillRect:
 
     mov di, ax
 
-    ; Draw one row
     mov cx, si
     mov al, [bp+12]
 
     cld
     rep stosb
 
-    ; Next row
     inc bx
     dec dx
 
@@ -756,10 +686,7 @@ FillRect:
     ret
 
 
-; Procedure: GetTile
-; Inputs: px [BP+4], py [BP+6].
-; Output: Tile code in AX.
-
+; Get tile at pixel position
 GetTile:
     push bp
     mov bp, sp
@@ -768,32 +695,25 @@ GetTile:
     push dx
     push si
 
-    ; Check horizontal boundary
     cmp word [bp+4], 960
     jae .outside
 
-    ; Check vertical boundary
     cmp word [bp+6], 192
     jae .outside
 
-    ; Calculate column = px / 16
     mov ax, [bp+4]
     shr ax, 4
     mov si, ax
 
-    ; Calculate row = py / 16
     mov ax, [bp+6]
     shr ax, 4
 
-    ; Calculate row * 60
     mov bx, MAP_COLUMNS
     mul bx
 
-    ; Calculate index
     add ax, si
     mov si, ax
 
-    ; Read tile code
     mov al, [level_map_working + si]
     xor ah, ah
 
@@ -810,9 +730,7 @@ GetTile:
     ret
 
 
-; Procedure: ResetMap
-; Copy original map into working map.
-
+; Reset map
 ResetMap:
     push cx
     push si
@@ -838,39 +756,31 @@ ResetMap:
     ret
 
 
-; Procedure: DrawTile
-; Inputs: x [BP+4], y [BP+6], tile code [BP+8].
-
+; Draw tile
 DrawTile:
     push bp
     mov bp, sp
 
     push ax
 
-    ; Sky tile
     cmp word [bp+8], TILE_SKY
     je .sky
 
-    ; Ground tile
     cmp word [bp+8], TILE_GROUND
     je .ground
 
-    ; Brick tile
     cmp word [bp+8], TILE_BRICK
     je .brick
 
-    ; Question blocks
     cmp word [bp+8], TILE_QUESTION_COIN
     je .question
 
     cmp word [bp+8], TILE_QUESTION_MUSHROOM
     je .question
 
-    ; Empty block
     cmp word [bp+8], TILE_EMPTY_BLOCK
     je .empty
 
-    ; Pipe tiles
     cmp word [bp+8], TILE_PIPE_TOP_LEFT
     je .pipe
 
@@ -883,15 +793,12 @@ DrawTile:
     cmp word [bp+8], TILE_PIPE_BODY_RIGHT
     je .pipe
 
-    ; Stair tile
     cmp word [bp+8], TILE_STAIR
     je .ground
 
-    ; Coin tile
     cmp word [bp+8], TILE_COIN
     je .question
 
-    ; Flag tile
     cmp word [bp+8], TILE_FLAG
     je .flag
 
@@ -925,7 +832,6 @@ DrawTile:
     mov ax, COLOR_TEXT
 
 .draw:
-    ; Pass colour, height, width, y and x
     push ax
     push word 16
     push word 16
@@ -940,11 +846,7 @@ DrawTile:
     ret
 
 
-; Procedure: DrawMap
-; Starting column [BP+4].
-; Pixel offset [BP+6].
-; Draws 21 columns for smooth scrolling.
-
+; Draw map
 DrawMap:
     push bp
     mov bp, sp
@@ -956,11 +858,7 @@ DrawMap:
     push si
     push di
 
-    ; Reserve local variables
     sub sp, 6
-
-    ; [BP-14] = row
-    ; [BP-16] = screen column
 
     mov word [bp-14], 0
 
@@ -974,26 +872,21 @@ DrawMap:
     cmp word [bp-16], 21
     jae .next_row
 
-    ; Calculate world column
     mov ax, [bp+4]
     add ax, [bp-16]
 
-    ; Check level boundary
     cmp ax, MAP_COLUMNS
     jae .sky_tile
 
     mov bx, ax
 
-    ; Calculate row * 60
     mov ax, [bp-14]
     mov dx, MAP_COLUMNS
     mul dx
 
-    ; Calculate map index
     add ax, bx
     mov si, ax
 
-    ; Read tile code
     xor ax, ax
     mov al, [level_map_working + si]
 
@@ -1003,16 +896,13 @@ DrawMap:
     mov ax, TILE_SKY
 
 .draw_tile:
-    ; Calculate screen Y
     mov bx, [bp-14]
     shl bx, 4
 
-    ; Calculate screen X with pixel offset
     mov cx, [bp-16]
     shl cx, 4
     sub cx, [bp+6]
 
-    ; Pass tile code, Y and X
     push ax
     push bx
     push cx
@@ -1028,10 +918,8 @@ DrawMap:
     jmp .row_loop
 
 .done:
-    ; Remove local variables
     add sp, 6
 
-    ; Restore registers
     pop di
     pop si
     pop dx
@@ -1042,10 +930,7 @@ DrawMap:
     ret
 
 
-; Procedure: UpdateCamera
-; World X [BP+4], current camera X [BP+6].
-; Output: New camera X in AX.
-
+; Update camera
 UpdateCamera:
     push bp
     mov bp, sp
@@ -1053,29 +938,23 @@ UpdateCamera:
     push bx
     push dx
 
-    ; Get current camera position
     mov dx, [bp+6]
 
-    ; Calculate screen X
     mov ax, [bp+4]
     sub ax, dx
 
-    ; Scroll after Mario passes screen middle
     cmp ax, 160
     jbe .keep_camera
 
-    ; New camera = world X - 160
     mov ax, [bp+4]
     sub ax, 160
 
-    ; Maximum camera position = 640
     cmp ax, 640
     jbe .check_old_camera
 
     mov ax, 640
 
 .check_old_camera:
-    ; Camera must never move backwards
     cmp ax, dx
     jae .done
 
@@ -1092,29 +971,21 @@ UpdateCamera:
     ret
 
 
-
-; Procedure: InstallKeyboard
-; Save the original INT 09h vector
-; and install our keyboard ISR.
-
+; Install keyboard interrupt
 InstallKeyboard:
     push ax
     push dx
     push ds
     push es
 
-    ; Get original keyboard interrupt address
     mov ax, 3509h
     int 21h
 
-    ; Save original offset
     mov [old_int9_offset], bx
 
-    ; Save original segment
     mov ax, es
     mov [old_int9_segment], ax
 
-    ; Install our keyboard interrupt
     mov ax, cs
     mov ds, ax
 
@@ -1122,7 +993,6 @@ InstallKeyboard:
     mov ax, 2509h
     int 21h
 
-    ; Mark keyboard interrupt as installed
     mov byte [keyboard_installed], 1
 
     pop es
@@ -1132,30 +1002,24 @@ InstallKeyboard:
     ret
 
 
-; Procedure: RestoreKeyboard
-; Restore the original INT 09h vector.
-
+; Restore keyboard interrupt
 RestoreKeyboard:
     push ax
     push bx
     push dx
     push ds
 
-    ; Check whether our interrupt is installed
     mov ax, cs
     mov ds, ax
 
     cmp byte [keyboard_installed], 1
     jne .done
 
-    ; Mark it as restored
     mov byte [keyboard_installed], 0
 
-    ; Get original interrupt address
     mov dx, [old_int9_offset]
     mov bx, [old_int9_segment]
 
-    ; Restore original interrupt
     mov ds, bx
     mov ax, 2509h
     int 21h
@@ -1168,59 +1032,380 @@ RestoreKeyboard:
     ret
 
 
-
-
-; Procedure: KeyboardISR
-; Custom keyboard interrupt handler.
-; Records key presses and releases.
-
+; Keyboard interrupt handler
 KeyboardISR:
     push ax
     push bx
     push ds
 
-    ; Use our program data segment
     mov ax, cs
     mov ds, ax
 
-    ; Read keyboard scan code
     in al, 60h
-
-    ; Save original scan code
     mov bl, al
 
-    ; Remove release bit
+    ; Acknowledge keyboard controller
+    in al, 61h
+    mov ah, al
+    or al, 80h
+    out 61h, al
+    mov al, ah
     and al, 7Fh
+    out 61h, al
 
-    ; Use scan code as array index
-    xor bh, bh
-
-    ; Check whether key was released
-    test bl, 80h
+    ; Check whether the key was released
+    mov al, bl
+    test al, 80h
     jnz .key_released
 
     ; Key pressed
+    and al, 7Fh
+    xor bh, bh
+    mov bl, al
     mov byte [key_states + bx], 1
     mov byte [key_event], 1
-
     jmp .send_eoi
 
 .key_released:
-    ; Key released
+    ; Correctly remove release bit before indexing
+    and al, 7Fh
+    xor bh, bh
+    mov bl, al
     mov byte [key_states + bx], 0
 
 .send_eoi:
-    ; Send End Of Interrupt to PIC
     mov al, 20h
     out 20h, al
 
     pop ds
     pop bx
     pop ax
-
     iret
 
 
+; Read keyboard input
+ReadKeyboard:
+    push ax
 
-; End of program image
+    mov byte [input_left], 0
+    mov byte [input_right], 0
+    mov byte [input_jump], 0
+
+    cmp byte [key_states + KEY_LEFT], 1
+    jne .check_right
+
+    mov byte [input_left], 1
+
+.check_right:
+    cmp byte [key_states + KEY_RIGHT], 1
+    jne .check_jump
+
+    mov byte [input_right], 1
+
+.check_jump:
+    cmp byte [key_states + KEY_SPACE], 1
+    je .jump_pressed
+
+    cmp byte [key_states + KEY_UP], 1
+    jne .check_escape
+
+.jump_pressed:
+    mov byte [input_jump], 1
+
+.check_escape:
+    cmp byte [key_states + KEY_ESCAPE], 1
+    jne .done
+
+    mov byte [exit_requested], 1
+
+.done:
+    pop ax
+    ret
+
+
+; Install timer interrupt
+InstallTimer:
+    push ax
+    push bx
+    push dx
+    push ds
+    push es
+
+    mov ax, 3508h
+    int 21h
+
+    mov [old_int8_offset], bx
+    mov ax, es
+    mov [old_int8_segment], ax
+
+    mov ax, cs
+    mov ds, ax
+    mov dx, TimerISR
+    mov ax, 2508h
+    int 21h
+
+    mov byte [timer_installed], 1
+
+    pop es
+    pop ds
+    pop dx
+    pop bx
+    pop ax
+    ret
+
+
+; Restore timer interrupt
+RestoreTimer:
+    push ax
+    push dx
+    push ds
+
+    mov ax, cs
+    mov ds, ax
+
+    cmp byte [timer_installed], 1
+    jne .done
+
+    mov byte [timer_installed], 0
+
+    mov dx, [old_int8_offset]
+    mov ax, [old_int8_segment]
+    mov ds, ax
+
+    mov ax, 2508h
+    int 21h
+
+.done:
+    pop ds
+    pop dx
+    pop ax
+    ret
+
+
+; Timer interrupt handler
+TimerISR:
+    push ax
+    push ds
+
+    mov ax, cs
+    mov ds, ax
+
+    inc word [timer_ticks]
+
+    pop ds
+    pop ax
+
+    jmp far [cs:old_int8_offset]
+
+
+; Update Mario physics
+UpdatePhysics:
+    push ax
+    push bx
+
+    ; Move left
+    cmp byte [input_left], 1
+    jne .check_right
+
+    sub dword [hero_x_fp], HERO_SPEED
+    jc .clamp_left
+
+    mov byte [hero_facing], 0
+    jmp .check_jump
+
+.clamp_left:
+    mov dword [hero_x_fp], 0
+    mov byte [hero_facing], 0
+    jmp .check_jump
+
+.check_right:
+    cmp byte [input_right], 1
+    jne .check_jump
+
+    add dword [hero_x_fp], HERO_SPEED
+    cmp dword [hero_x_fp], HERO_MAX_X_FP
+    jbe .right_ok
+
+    mov dword [hero_x_fp], HERO_MAX_X_FP
+
+.right_ok:
+    mov byte [hero_facing], 1
+
+.check_jump:
+    ; Jump only once per key press
+    cmp byte [input_jump], 1
+    jne .jump_released
+
+    cmp byte [jump_was_down], 1
+    je .vertical_update
+
+    mov byte [jump_was_down], 1
+
+    cmp byte [hero_on_ground], 1
+    jne .vertical_update
+
+    mov word [hero_vy], JUMP_SPEED
+    mov byte [hero_on_ground], 0
+    jmp .vertical_update
+
+.jump_released:
+    mov byte [jump_was_down], 0
+
+.vertical_update:
+    cmp byte [hero_on_ground], 1
+    je .save_positions
+
+    mov ax, [hero_vy]
+    add [hero_y_fp], ax
+
+    add word [hero_vy], GRAVITY
+
+    mov ax, [hero_y_fp]
+    mov cl, 8
+    shr ax, cl
+    mov [hero_y], ax
+
+    cmp word [hero_vy], 0
+    jl .save_positions
+
+    mov ax, [hero_y]
+    add ax, 16
+    push ax
+
+    mov ax, [hero_x]
+    add ax, 8
+    push ax
+
+    call GetTile
+    add sp, 4
+
+    cmp ax, TILE_SKY
+    je .save_positions
+
+    cmp ax, TILE_COIN
+    je .save_positions
+
+    mov ax, [hero_y]
+    add ax, 16
+    and ax, 0FFF0h
+    sub ax, 16
+    shl ax, 8
+    mov [hero_y_fp], ax
+
+    mov word [hero_vy], 0
+    mov byte [hero_on_ground], 1
+
+.save_positions:
+    mov ax, [hero_x_fp + 1]
+    mov [hero_x], ax
+
+    mov ax, [hero_y_fp]
+    mov cl, 8
+    shr ax, cl
+    mov [hero_y], ax
+
+    pop bx
+    pop ax
+    ret
+
+
+; Draw complete frame
+RenderFrame:
+    push ax
+    push dx
+
+    call ClearBuffer
+
+    push word [camera_x]
+    push word [hero_x]
+    call UpdateCamera
+    add sp, 4
+    mov [camera_x], ax
+
+    mov ax, [camera_x]
+    mov dx, ax
+    and dx, 000Fh
+    shr ax, 4
+
+    push dx
+    push ax
+    call DrawMap
+    add sp, 4
+
+    mov ax, [hero_x]
+    sub ax, [camera_x]
+
+    push word [hero_y]
+    push ax
+    call DrawMario
+    add sp, 4
+
+    call FramePresent
+
+    pop dx
+    pop ax
+    ret
+
+
+; Draw Mario sprite
+DrawMario:
+    push bp
+    mov bp, sp
+
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+
+    xor si, si
+    xor di, di
+
+.row_loop:
+    xor bx, bx
+
+.column_loop:
+    mov al, [mario_sprite + si]
+    inc si
+
+    cmp al, 0
+    je .next_cell
+
+    mov [mario_pixel_color], al
+
+    mov ax, bx
+    shl ax, 1
+    add ax, [bp+4]
+
+    mov dx, di
+    shl dx, 1
+    add dx, [bp+6]
+
+    push word [mario_pixel_color]
+    push word 2
+    push word 2
+    push dx
+    push ax
+    call FillRect
+    add sp, 10
+
+.next_cell:
+    inc bx
+    cmp bx, 8
+    jb .column_loop
+
+    inc di
+    cmp di, 8
+    jb .row_loop
+
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    pop bp
+    ret
+
 program_end:
