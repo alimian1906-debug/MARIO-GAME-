@@ -55,14 +55,15 @@ TILE_FLAG equ 12
 ; Physics values: 8.8 fixed point
 
 WALK_ACCEL equ 0040h
-FRICTION equ 0020h
+FRICTION equ 0100h
 
 WALK_MAX_SPEED equ 0200h
 RUN_MAX_SPEED equ 0300h
 
+; Increased jump height
 GRAVITY equ 0080h
-JUMP_SPEED equ 0FA00h
-JUMP_CUTOFF equ 0FC00h
+JUMP_SPEED equ 0F800h
+JUMP_CUTOFF equ 0FB00h
 MAX_FALL_SPEED equ 0600h
 
 HERO_MAX_X_FP equ 241664
@@ -131,7 +132,6 @@ start:
     cmp byte [exit_requested], 1
     je .exit_game
 
-    ; Wait for the next timer tick
 .wait_tick:
 
     mov ax, [timer_ticks]
@@ -145,7 +145,6 @@ start:
     cmp byte [exit_requested], 1
     je .exit_game
 
-    ; Update the current game state
     cmp byte [game_state], STATE_PLAYING
     jne .other_state
 
@@ -215,6 +214,7 @@ hero_on_ground db 1
 hero_facing db 1
 
 jump_was_down db 0
+air_jumps db 0
 
 camera_x dw 0
 
@@ -309,17 +309,12 @@ ResetMap:
     push ds
     pop es
 
-    ; Clear the entire map
     mov di, level_map_working
     mov al, TILE_SKY
     mov cx, MAP_SIZE
 
     cld
     rep stosb
-
-    ; Create ground rows
-    ; Row 10 begins at offset 600
-    ; Row 11 begins at offset 660
 
     xor bx, bx
 
@@ -401,7 +396,7 @@ ResetMap:
     mov byte [level_map_working + 583], TILE_PIPE_BODY_LEFT
     mov byte [level_map_working + 584], TILE_PIPE_BODY_RIGHT
 
-    ; Flagpole at the end of the level
+    ; Flagpole
     mov byte [level_map_working + 239], TILE_FLAG
     mov byte [level_map_working + 299], TILE_FLAG
     mov byte [level_map_working + 359], TILE_FLAG
@@ -440,6 +435,7 @@ ResetPlayer:
     mov byte [hero_on_ground], 1
     mov byte [hero_facing], 1
     mov byte [jump_was_down], 0
+    mov byte [air_jumps], 0
 
     mov word [camera_x], 0
 
@@ -521,9 +517,7 @@ FramePresent:
 
 ; ==========================================
 ; DRAW RECTANGLE
-;
-; Parameters:
-; x, y, width, height, color
+; Parameters: x, y, width, height, color
 ; ==========================================
 
 FillRect:
@@ -644,7 +638,6 @@ FillRect:
 
 ; ==========================================
 ; GET TILE
-;
 ; Parameters: x, y
 ; Returns: AX = tile code
 ; ==========================================
@@ -700,10 +693,8 @@ GetTile:
 
 ; ==========================================
 ; CHECK SOLID TILE
-;
 ; Parameters: x, y
-; Returns: AL = 1 if solid
-;          AL = 0 if not solid
+; Returns: AL = 1 if solid, 0 if not
 ; ==========================================
 
 CheckSolid:
@@ -747,7 +738,6 @@ CheckSolid:
 
 ; ==========================================
 ; DRAW TILE
-;
 ; Parameters: x, y, tile
 ; ==========================================
 
@@ -846,18 +836,19 @@ DrawTile:
 
 .coin:
 
-    mov ax, COLOR_ENEMY
+    ; Larger, brighter coin
+    mov ax, 14
 
     push ax
-    push word 10
-    push word 6
+    push word 12
+    push word 8
 
     mov ax, [bp+6]
-    add ax, 3
+    add ax, 2
     push ax
 
     mov ax, [bp+4]
-    add ax, 5
+    add ax, 4
     push ax
 
     call FillRect
@@ -982,7 +973,6 @@ DrawMap:
 
 ; ==========================================
 ; DRAW MARIO
-;
 ; Parameters: x, y
 ; ==========================================
 
@@ -1267,6 +1257,7 @@ UpdatePhysics:
     jmp .check_ground_support
 
 .hit_right:
+
     mov ax, [hero_x]
     add ax, 15
     and ax, 0FFF0h
@@ -1324,6 +1315,7 @@ UpdatePhysics:
     jmp .check_ground_support
 
 .hit_left:
+
     mov ax, [hero_x]
     and ax, 0FFF0h
     add ax, 16
@@ -1383,6 +1375,7 @@ UpdatePhysics:
     ; No ground below Mario
     mov byte [hero_on_ground], 0
 
+
 ; ------------------------------------------
 ; JUMP INPUT
 ; ------------------------------------------
@@ -1392,17 +1385,32 @@ UpdatePhysics:
     cmp byte [input_jump], 1
     jne .jump_released
 
+    ; Do not jump repeatedly while Space is held
     cmp byte [jump_was_down], 1
     je .vertical_update
 
     mov byte [jump_was_down], 1
 
+    ; Normal jump from the ground
     cmp byte [hero_on_ground], 1
-    jne .vertical_update
+    jne .extra_jump
 
     mov word [hero_vy], JUMP_SPEED
 
     mov byte [hero_on_ground], 0
+    mov byte [air_jumps], 0
+
+    jmp .vertical_update
+
+.extra_jump:
+
+    ; Allow one additional jump in the air
+    cmp byte [air_jumps], 1
+    jae .vertical_update
+
+    mov word [hero_vy], JUMP_SPEED
+
+    inc byte [air_jumps]
 
     jmp .vertical_update
 
@@ -1482,10 +1490,6 @@ UpdatePhysics:
 ; HEAD COLLISION
 ; ------------------------------------------
 
-; ------------------------------------------
-; HEAD COLLISION
-; ------------------------------------------
-
 .check_head_collision:
 
     ; Left point
@@ -1537,9 +1541,6 @@ UpdatePhysics:
 
     jmp .check_pit
 
-; ------------------------------------------
-; FOOT COLLISION
-; ------------------------------------------
 
 ; ------------------------------------------
 ; FOOT COLLISION
@@ -1598,8 +1599,10 @@ UpdatePhysics:
 
     mov word [hero_vy], 0
     mov byte [hero_on_ground], 1
+    mov byte [air_jumps], 0
 
     jmp .finish_physics
+
 
 ; ------------------------------------------
 ; PIT DETECTION
@@ -1623,6 +1626,95 @@ UpdatePhysics:
 
 .finish_physics:
 
+    ; Collect a coin if Mario touches one
+    call CollectCoins
+
+    pop dx
+    pop bx
+    pop ax
+
+    ret
+
+
+; ==========================================
+; COLLECT COINS
+; ==========================================
+
+CollectCoins:
+
+    push ax
+    push bx
+    push dx
+    push si
+
+    ; Do not collect coins while dying
+    cmp byte [game_state], STATE_PLAYING
+    jne .done
+
+    ; Check Mario's centre position
+    mov ax, [hero_x]
+    add ax, 8
+
+    mov bx, [hero_y]
+    add bx, 8
+
+    push bx
+    push ax
+
+    call GetTile
+    add sp, 4
+
+    ; Is there a coin at this position?
+    cmp ax, TILE_COIN
+    jne .done
+
+    ; Calculate coin's map index
+    mov ax, [hero_y]
+    add ax, 8
+    shr ax, 4
+
+    mov bx, MAP_COLUMNS
+    mul bx
+
+    mov si, ax
+
+    mov ax, [hero_x]
+    add ax, 8
+    shr ax, 4
+
+    add si, ax
+
+    ; Remove the collected coin
+    mov byte [level_map_working + si], TILE_SKY
+
+    ; Increase coin count
+    inc word [coins]
+
+    ; Add 100 points
+    add dword [score], 100
+
+    ; Keep score within the maximum
+    cmp dword [score], MAX_SCORE
+    jbe .check_extra_life
+
+    mov dword [score], MAX_SCORE
+
+.check_extra_life:
+
+    ; Every 100 coins gives one extra life
+    cmp word [coins], 100
+    jb .done
+
+    mov word [coins], 0
+
+    cmp byte [lives], MAX_LIVES
+    jae .done
+
+    inc byte [lives]
+
+.done:
+
+    pop si
     pop dx
     pop bx
     pop ax
