@@ -22,6 +22,8 @@ COLOR_HERO equ 12
 COLOR_ENEMY equ 14
 COLOR_TEXT equ 15
 COLOR_HUD equ 11
+COLOR_MUSHROOM equ 10
+COLOR_COIN_BLOCK equ 14
 
 ; Keyboard scan codes
 KEY_LEFT equ 4Bh
@@ -148,7 +150,40 @@ start:
     cmp byte [game_state], STATE_PLAYING
     jne .other_state
 
+    ; Count timer ticks
+    inc word [second_ticks]
+
+    cmp word [second_ticks], 18
+    jb .timer_ready
+
+    ; One second has passed
+    mov word [second_ticks], 0
+
+    ; Decrease remaining time
+    cmp word [game_time], 0
+    je .time_up
+
+    dec word [game_time]
+
+    cmp word [game_time], 0
+    jne .timer_ready
+
+.time_up:
+
+    ; Time has finished
+    call StartDeath
+    jmp .render
+
+.timer_ready:
+
+    call UpdateInvulnerability
     call UpdatePhysics
+
+    cmp byte [game_state], STATE_PLAYING
+    jne .render
+
+    call UpdateEnemies
+    call UpdateMushroom
     jmp .render
 
 .other_state:
@@ -210,6 +245,9 @@ hero_y_fp dw 36864
 hero_vx dw 0
 hero_vy dw 0
 
+hero_previous_y dw 144
+hero_previous_vy dw 0
+
 hero_on_ground db 1
 hero_facing db 1
 
@@ -219,12 +257,46 @@ air_jumps db 0
 camera_x dw 0
 
 hero_hp db 1
+invulnerability_ticks dw 0
 
 score dd 0
 coins dw 0
 lives db START_LIVES
 
+; HUD text
+hud_score db ' SCORE: ',0
+hud_coins db '  COINS: ',0
+hud_lives db '  LIVES: ',0
+hud_time db '  TIME: ',0
+hud_power db '  POWER: ',0
+
+hud_small db 'SMALL',0
+hud_super db 'SUPER',0
+
+; Enemy system
+ENEMY_COUNT equ 6
+
+enemy_x dw 96, 240, 400, 520, 680, 880
+enemy_dir db 1, 0FFh, 1, 0FFh, 1, 1
+enemy_type db 0, 0, 0, 0, 1, 1
+enemy_state db 0, 0, 0, 0, 0, 0
+
+enemy_sprite_ptr dw 0
+enemy_draw_x dw 0
+enemy_draw_y dw 144
+enemy_draw_row dw 0
+enemy_draw_col dw 0
+enemy_pixel_color db 0
+
 game_time dw START_TIME
+second_ticks dw 0
+
+; Mushroom power-up
+mushroom_active db 0
+mushroom_x dw 0
+mushroom_y dw 0
+mushroom_dir db 1
+mushroom_vy dw 0
 
 game_state db STATE_PLAYING
 state_ticks dw 0
@@ -284,6 +356,53 @@ mario_sprite:
     db 0,1,1,0,0,1,1,0
     db 6,6,6,0,0,6,6,6
 
+
+; ==========================================
+; GOOMBA SPRITE
+; ==========================================
+
+goomba_sprite:
+
+    db 0,0,4,4,4,4,0,0
+    db 0,4,4,4,4,4,4,0
+    db 4,4,6,6,6,6,4,4
+    db 0,4,6,6,6,6,4,0
+    db 0,0,4,4,4,4,0,0
+    db 0,4,4,4,4,4,4,0
+    db 4,4,0,0,0,0,4,4
+    db 4,4,0,0,0,0,4,4
+
+
+; ==========================================
+; KOOPA SPRITE
+; ==========================================
+
+koopa_sprite:
+
+    db 0,0,14,14,14,14,0,0
+    db 0,14,14,14,14,14,14,0
+    db 14,14,2,2,2,2,14,14
+    db 14,14,2,10,10,2,14,14
+    db 0,2,2,2,2,2,2,0
+    db 0,2,2,2,2,2,2,0
+    db 0,0,14,0,0,14,0,0
+    db 0,0,14,0,0,14,0,0
+
+
+; ==========================================
+; KOOPA SHELL SPRITE
+; ==========================================
+
+koopa_shell_sprite:
+
+    db 0,0,0,0,0,0,0,0
+    db 0,2,2,2,2,2,2,0
+    db 2,2,10,2,2,10,2,2
+    db 2,2,2,2,2,2,2,2
+    db 2,2,2,2,2,2,2,2
+    db 0,2,2,2,2,2,2,0
+    db 0,0,0,0,0,0,0,0
+    db 0,0,0,0,0,0,0,0
 
 ; ==========================================
 ; LEVEL MAP
@@ -352,10 +471,24 @@ ResetMap:
 
 .blocks:
 
-    ; Question blocks
-    mov byte [level_map_working + 428], TILE_QUESTION_COIN
+       ; Three coin question blocks
     mov byte [level_map_working + 433], TILE_QUESTION_COIN
+    mov byte [level_map_working + 438], TILE_QUESTION_COIN
+    mov byte [level_map_working + 443], TILE_QUESTION_COIN
+
+    ; Two mushroom question blocks
+    mov byte [level_map_working + 428], TILE_QUESTION_MUSHROOM
     mov byte [level_map_working + 447], TILE_QUESTION_MUSHROOM
+
+    ; First brick group
+    mov byte [level_map_working + 429], TILE_BRICK
+    mov byte [level_map_working + 430], TILE_BRICK
+    mov byte [level_map_working + 431], TILE_BRICK
+
+    ; Second brick group
+    mov byte [level_map_working + 448], TILE_BRICK
+    mov byte [level_map_working + 449], TILE_BRICK
+    mov byte [level_map_working + 450], TILE_BRICK
 
     ; First brick group
     mov byte [level_map_working + 429], TILE_BRICK
@@ -422,6 +555,7 @@ ResetMap:
 ResetPlayer:
 
     call ResetMap
+    call ResetEnemies
 
     mov dword [hero_x_fp], 8192
     mov word [hero_y_fp], 36864
@@ -432,6 +566,10 @@ ResetPlayer:
     mov word [hero_vx], 0
     mov word [hero_vy], 0
 
+    mov word [hero_previous_y], 144
+    mov word [hero_previous_vy], 0
+
+
     mov byte [hero_on_ground], 1
     mov byte [hero_facing], 1
     mov byte [jump_was_down], 0
@@ -440,6 +578,482 @@ ResetPlayer:
     mov word [camera_x], 0
 
     mov byte [hero_hp], 1
+    mov word [invulnerability_ticks], 0
+
+    ; Reset mushroom power-up
+    mov byte [mushroom_active], 0
+    mov word [mushroom_x], 0
+    mov word [mushroom_y], 0
+    mov byte [mushroom_dir], 1
+    mov word [mushroom_vy], 0
+
+    ret
+
+
+
+; ==========================================
+; RESET ENEMIES
+; ==========================================
+
+ResetEnemies:
+
+    mov word [enemy_x], 96
+    mov word [enemy_x+2], 240
+    mov word [enemy_x+4], 400
+    mov word [enemy_x+6], 520
+    mov word [enemy_x+8], 760
+    mov word [enemy_x+10], 880
+
+    mov byte [enemy_dir], 1
+    mov byte [enemy_dir+1], 0FFh
+    mov byte [enemy_dir+2], 1
+    mov byte [enemy_dir+3], 0FFh
+    mov byte [enemy_dir+4], 1
+    mov byte [enemy_dir+5], 0FFh
+
+    mov byte [enemy_state], 0
+    mov byte [enemy_state+1], 0
+    mov byte [enemy_state+2], 0
+    mov byte [enemy_state+3], 0
+    mov byte [enemy_state+4], 0
+    mov byte [enemy_state+5], 0
+
+    ret
+
+
+
+
+; ==========================================
+; UPDATE INVULNERABILITY
+; ==========================================
+
+UpdateInvulnerability:
+
+    cmp word [invulnerability_ticks], 0
+    je .done
+
+    dec word [invulnerability_ticks]
+
+.done:
+    ret
+
+
+; ==========================================
+; HANDLE MARIO DAMAGE
+; ==========================================
+
+HandleHeroHit:
+
+    ; Already protected?
+    cmp word [invulnerability_ticks], 0
+    jne .done
+
+    ; Super Mario becomes Small Mario
+    cmp byte [hero_hp], 2
+    jne .kill_mario
+
+    mov byte [hero_hp], 1
+
+    ; Give 2 seconds of protection
+    mov word [invulnerability_ticks], 36
+
+    ; Small bounce after taking damage
+    mov word [hero_vy], JUMP_SPEED
+    mov byte [hero_on_ground], 0
+
+    jmp .done
+
+.kill_mario:
+
+    call StartDeath
+
+.done:
+    ret
+
+
+
+
+; ==========================================
+; UPDATE ENEMIES
+; ==========================================
+
+UpdateEnemies:
+
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push bp
+
+    xor si, si
+
+.enemy_loop:
+
+    cmp si, ENEMY_COUNT
+    jae .done
+
+    mov bx, si
+    shl bx, 1
+
+    ; Skip defeated enemies
+    cmp byte [enemy_state+si], 3
+    je .next_enemy
+
+    ; Move sliding shell
+    cmp byte [enemy_state+si], 2
+    je .slide_shell
+
+    ; Stationary shell does not move
+    cmp byte [enemy_state+si], 1
+    je .check_collision
+
+    ; Walking enemy moves right or left
+    cmp byte [enemy_dir+si], 0
+    jl .walk_left
+
+.walk_right:
+    ; Check for a wall or pipe ahead
+    mov ax, [enemy_x+bx]
+    add ax, 16
+
+    mov dx, 152
+
+    push dx
+    push ax
+    call CheckSolid
+    add sp, 4
+
+    cmp al, 1
+    je .turn_left
+
+        ; Check whether another enemy is ahead
+    xor di, di
+
+.check_enemy_right:
+
+    cmp di, ENEMY_COUNT
+    jae .right_enemy_clear
+
+    cmp di, si
+    je .right_next_enemy
+
+    cmp byte [enemy_state+di], 3
+    je .right_next_enemy
+
+    mov ax, [enemy_x+bx]
+    add ax, 17
+
+    mov bp, di
+    shl bp, 1
+
+    cmp ax, [ds:enemy_x+bp]
+    jbe .right_next_enemy
+
+    mov ax, [ds:enemy_x+bp]
+    add ax, 16
+
+    mov dx, [enemy_x+bx]
+    inc dx
+
+    cmp ax, dx
+    ja .turn_left
+
+.right_next_enemy:
+
+    inc di
+    jmp .check_enemy_right
+
+.right_enemy_clear:
+
+    ; Check ground ahead of enemy
+    mov ax, [enemy_x+bx]
+    add ax, 16
+
+    mov dx, 160
+
+    push dx
+    push ax
+    call CheckSolid
+    add sp, 4
+
+    cmp al, 1
+    jne .turn_left
+
+    ; Ground exists, move right
+    inc word [enemy_x+bx]
+
+    cmp word [enemy_x+bx], 928
+    jbe .check_collision
+
+    mov word [enemy_x+bx], 928
+
+    jmp .check_collision
+
+
+.turn_left:
+
+    ; Turn around at pit
+    mov byte [enemy_dir+si], 0FFh
+
+    jmp .check_collision
+
+
+.walk_left:
+    ; Check for a wall or pipe ahead
+    mov ax, [enemy_x+bx]
+    dec ax
+
+    mov dx, 152
+
+    push dx
+    push ax
+    call CheckSolid
+    add sp, 4
+
+    cmp al, 1
+    je .turn_right
+        ; Check whether another enemy is ahead
+    xor di, di
+
+.check_enemy_left:
+
+    cmp di, ENEMY_COUNT
+    jae .left_enemy_clear
+
+    cmp di, si
+    je .left_next_enemy
+
+    cmp byte [enemy_state+di], 3
+    je .left_next_enemy
+
+    mov ax, [enemy_x+bx]
+    dec ax
+    add ax, 16
+
+    mov bp, di
+    shl bp, 1
+
+    cmp ax, [ds:enemy_x+bp]
+    jbe .left_next_enemy
+
+    mov ax, [ds:enemy_x+bp]
+    add ax, 16
+
+    mov dx, [enemy_x+bx]
+    dec dx
+
+    cmp dx, ax
+    jae .left_next_enemy
+
+    jmp .turn_right
+
+.left_next_enemy:
+
+    inc di
+    jmp .check_enemy_left
+
+.left_enemy_clear:
+
+    ; Check ground ahead of enemy
+    mov ax, [enemy_x+bx]
+    dec ax
+
+    mov dx, 160
+
+    push dx
+    push ax
+    call CheckSolid
+    add sp, 4
+
+    cmp al, 1
+    jne .turn_right
+
+    ; Ground exists, move left
+    dec word [enemy_x+bx]
+
+    cmp word [enemy_x+bx], 32
+    jae .check_collision
+
+    mov word [enemy_x+bx], 32
+
+    jmp .check_collision
+
+
+.turn_right:
+
+    ; Turn around at pit
+    mov byte [enemy_dir+si], 1
+
+    jmp .check_collision
+
+
+; ------------------------------------------
+; KOOPA SHELL MOVEMENT
+; ------------------------------------------
+
+.slide_shell:
+
+    cmp byte [enemy_dir+si], 0
+    jl .slide_left
+
+.slide_right:
+
+    add word [enemy_x+bx], 3
+
+    cmp word [enemy_x+bx], 928
+    jbe .check_collision
+
+    mov word [enemy_x+bx], 928
+    jmp .check_collision
+
+.slide_left:
+
+    sub word [enemy_x+bx], 3
+
+    cmp word [enemy_x+bx], 32
+    jae .check_collision
+
+    mov word [enemy_x+bx], 32
+
+
+; ------------------------------------------
+; CHECK MARIO COLLISION
+; ------------------------------------------
+
+.check_collision:
+
+
+    ; Ignore enemies while Mario is invulnerable
+    cmp word [invulnerability_ticks], 0
+    jne .next_enemy
+    ; Check horizontal overlap
+    mov ax, [hero_x]
+    add ax, 16
+
+    cmp ax, [enemy_x+bx]
+    jbe .next_enemy
+
+    mov ax, [enemy_x+bx]
+    add ax, 16
+
+    cmp ax, [hero_x]
+    jbe .next_enemy
+
+    ; Check vertical overlap
+    mov ax, [hero_y]
+    add ax, 16
+
+    cmp ax, 144
+    jbe .next_enemy
+
+    cmp word [hero_y], 160
+    jae .next_enemy
+
+    ; Stationary shell is kicked
+    cmp byte [enemy_state+si], 1
+    je .kick_shell
+
+    ; If Mario is moving upward, do not treat it as a side hit
+    mov ax, [hero_y]
+    cmp ax, [hero_previous_y]
+    jb .next_enemy
+
+    mov ax, [hero_previous_y]
+    add ax, 16
+
+    cmp ax, 144
+    ja .side_hit
+
+    mov ax, [hero_y]
+
+    cmp ax, [hero_previous_y]
+    jb .side_hit
+
+    ; Stop a sliding shell when stomped
+    cmp byte [enemy_state+si], 2
+    je .stop_shell
+
+    ; Check enemy type
+    cmp byte [enemy_type+si], 0
+    jne .stomp_koopa
+
+    ; Defeat Goomba
+    mov byte [enemy_state+si], 3
+    add dword [score], 200
+
+    jmp .bounce_mario
+
+.stomp_koopa:
+
+    ; Koopa becomes a stationary shell
+    mov byte [enemy_state+si], 1
+    add dword [score], 400
+
+    jmp .bounce_mario
+
+.stop_shell:
+
+    ; Sliding shell becomes stationary
+    mov byte [enemy_state+si], 1
+
+.bounce_mario:
+
+    ; Place Mario on top of the enemy
+    mov word [hero_y], 128
+    call SaveHeroY
+
+    mov word [hero_vy], JUMP_SPEED
+    mov byte [hero_on_ground], 0
+    mov byte [air_jumps], 0
+
+    jmp .next_enemy
+
+.kick_shell:
+
+    mov ax, [hero_x]
+
+    cmp ax, [enemy_x+bx]
+    jae .kick_left
+
+    mov byte [enemy_dir+si], 1
+    jmp .start_shell
+
+.kick_left:
+
+    mov byte [enemy_dir+si], 0FFh
+
+.start_shell:
+
+    mov byte [enemy_state+si], 2
+    jmp .next_enemy
+
+.side_hit:
+
+    call HandleHeroHit
+    jmp .done
+
+.shell_hit:
+
+    call HandleHeroHit
+    jmp .done
+
+
+.next_enemy:
+
+    inc si
+    jmp .enemy_loop
+
+.done:
+
+    pop bp
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
 
     ret
 
@@ -761,11 +1375,10 @@ DrawTile:
     je .brick
 
     cmp ax, TILE_QUESTION_COIN
-    je .question
+    je .question_coin
 
     cmp ax, TILE_QUESTION_MUSHROOM
-    je .question
-
+    je .question_mushroom
     cmp ax, TILE_EMPTY_BLOCK
     je .empty
 
@@ -802,10 +1415,77 @@ DrawTile:
     mov ax, COLOR_BRICK
     jmp .normal_tile
 
-.question:
+.question_coin:
 
-    mov ax, COLOR_ENEMY
-    jmp .normal_tile
+    ; Yellow coin question block
+    push word COLOR_COIN_BLOCK
+    push word 16
+    push word 16
+    push word [bp+6]
+    push word [bp+4]
+    call FillRect
+    add sp, 10
+
+    ; Coin symbol
+    mov ax, [bp+6]
+    add ax, 4
+    push word 15
+    push word 4
+    push word 8
+    push ax
+
+    mov ax, [bp+4]
+    add ax, 6
+    push ax
+
+    call FillRect
+    add sp, 10
+
+    jmp .done
+
+
+.question_mushroom:
+
+    ; Green mushroom question block
+    push word COLOR_MUSHROOM
+    push word 16
+    push word 16
+    push word [bp+6]
+    push word [bp+4]
+    call FillRect
+    add sp, 10
+
+    ; Red mushroom cap
+    mov ax, [bp+6]
+    add ax, 4
+    push word 4
+    push word 8
+    push word 4
+    push ax
+
+    mov ax, [bp+4]
+    add ax, 4
+    push ax
+
+    call FillRect
+    add sp, 10
+
+    ; White mushroom stem
+    mov ax, [bp+6]
+    add ax, 8
+    push word 15
+    push word 4
+    push word 4
+    push ax
+
+    mov ax, [bp+4]
+    add ax, 6
+    push ax
+
+    call FillRect
+    add sp, 10
+
+    jmp .done
 
 .empty:
 
@@ -972,6 +1652,213 @@ DrawMap:
 
 
 ; ==========================================
+; DRAW ENEMIES
+; ==========================================
+
+DrawEnemies:
+
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+
+    xor si, si
+
+.enemy_loop:
+
+    cmp si, ENEMY_COUNT
+    jae .done
+
+    ; Skip defeated enemies
+    cmp byte [enemy_state+si], 3
+    je .next_enemy
+
+    ; Calculate enemy screen position
+    mov bx, si
+    shl bx, 1
+
+    mov ax, [enemy_x+bx]
+    sub ax, [camera_x]
+    mov [enemy_draw_x], ax
+
+    mov word [enemy_draw_y], 144
+
+    ; Select Goomba or Koopa sprite
+    cmp byte [enemy_type+si], 0
+    jne .koopa
+
+    mov word [enemy_sprite_ptr], goomba_sprite
+    jmp .draw_sprite
+
+.koopa:
+
+    ; Draw shell when Koopa is not walking
+    cmp byte [enemy_state+si], 0
+    jne .draw_shell
+
+    mov word [enemy_sprite_ptr], koopa_sprite
+    jmp .draw_sprite
+
+.draw_shell:
+
+    mov word [enemy_sprite_ptr], koopa_shell_sprite
+
+
+; ------------------------------------------
+; DRAW 8 x 8 SPRITE
+; ------------------------------------------
+
+.draw_sprite:
+
+    mov word [enemy_draw_row], 0
+
+.row_loop:
+
+    cmp word [enemy_draw_row], 8
+    jae .next_enemy
+
+    mov word [enemy_draw_col], 0
+
+.column_loop:
+
+    cmp word [enemy_draw_col], 8
+    jae .next_row
+
+    ; Calculate sprite position
+    mov bx, [enemy_draw_row]
+    shl bx, 3
+
+    add bx, [enemy_draw_col]
+    add bx, [enemy_sprite_ptr]
+
+    mov al, [bx]
+
+    ; Zero means transparent
+    cmp al, 0
+    je .next_column
+
+    mov [enemy_pixel_color], al
+
+    ; Calculate screen X
+    mov ax, [enemy_draw_col]
+    shl ax, 1
+    add ax, [enemy_draw_x]
+
+    ; Calculate screen Y
+    mov dx, [enemy_draw_row]
+    shl dx, 1
+    add dx, [enemy_draw_y]
+
+    ; Draw one 2 x 2 pixel block
+    push word [enemy_pixel_color]
+    push word 2
+    push word 2
+    push dx
+    push ax
+
+    call FillRect
+    add sp, 10
+
+.next_column:
+
+    inc word [enemy_draw_col]
+    jmp .column_loop
+
+.next_row:
+
+    inc word [enemy_draw_row]
+    jmp .row_loop
+
+
+.next_enemy:
+
+    inc si
+    jmp .enemy_loop
+
+.done:
+
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+
+    ret
+
+
+; ==========================================
+; DRAW MUSHROOM
+; ==========================================
+
+DrawMushroom:
+
+    push ax
+    push bx
+
+    cmp byte [mushroom_active], 1
+    jne .done
+
+    ; Calculate screen X
+    mov ax, [mushroom_x]
+    sub ax, [camera_x]
+    mov bx, ax
+
+    ; Mushroom cap
+    push word 2
+    push word 12
+    push word 6
+
+    mov ax, [mushroom_y]
+    push ax
+
+    push bx
+
+    call FillRect
+    add sp, 10
+
+    ; Mushroom stem
+    push word 15
+    push word 6
+    push word 6
+
+    mov ax, [mushroom_y]
+    add ax, 6
+    push ax
+
+    mov ax, bx
+    add ax, 3
+    push ax
+
+    call FillRect
+    add sp, 10
+
+    ; White spot on cap
+    push word 15
+    push word 2
+    push word 2
+
+    mov ax, [mushroom_y]
+    add ax, 2
+    push ax
+
+    mov ax, bx
+    add ax, 3
+    push ax
+
+    call FillRect
+    add sp, 10
+
+.done:
+
+    pop bx
+    pop ax
+
+    ret
+
+; ==========================================
 ; DRAW MARIO
 ; Parameters: x, y
 ; ==========================================
@@ -999,6 +1886,17 @@ DrawMario:
 
     mov al, [mario_sprite + si]
     inc si
+
+    ; Change Mario's red color after power-up
+    cmp byte [hero_hp], 2
+    jne .normal_color
+
+    cmp al, 4
+    jne .normal_color
+
+    mov al, 12
+
+.normal_color:
 
     cmp al, 0
     je .next_cell
@@ -1100,6 +1998,12 @@ UpdatePhysics:
     push ax
     push bx
     push dx
+
+    mov ax, [hero_y]
+    mov [hero_previous_y], ax
+
+    mov ax, [hero_vy]
+    mov [hero_previous_vy], ax
 
     ; Choose maximum speed
     mov bx, WALK_MAX_SPEED
@@ -1529,6 +2433,17 @@ UpdatePhysics:
 
 .hit_head:
 
+    ; Check which block Mario hit
+    mov ax, [hero_x]
+    add ax, 8
+
+    mov bx, [hero_y]
+
+    push bx
+    push ax
+    call ActivateBlock
+    add sp, 4
+
     ; Place Mario below the block
     mov ax, [hero_y]
     and ax, 0FFF0h
@@ -1687,21 +2602,40 @@ CollectCoins:
     ; Remove the collected coin
     mov byte [level_map_working + si], TILE_SKY
 
-    ; Increase coin count
+    ; Add coin and award points
+    call AddCoin
+
+.done:
+
+    pop si
+    pop dx
+    pop bx
+    pop ax
+
+    ret
+
+
+
+; ==========================================
+; ADD COIN
+; ==========================================
+
+AddCoin:
+
+    push ax
+
     inc word [coins]
 
-    ; Add 100 points
-    add dword [score], 100
+    add dword [score], 200
 
-    ; Keep score within the maximum
     cmp dword [score], MAX_SCORE
-    jbe .check_extra_life
+    jbe .check_life
 
     mov dword [score], MAX_SCORE
 
-.check_extra_life:
+.check_life:
 
-    ; Every 100 coins gives one extra life
+    ; 100 coins give an extra life
     cmp word [coins], 100
     jb .done
 
@@ -1714,13 +2648,303 @@ CollectCoins:
 
 .done:
 
+    pop ax
+    ret
+
+
+; ==========================================
+; ACTIVATE BLOCK
+; Parameters: x, y
+; ==========================================
+
+ActivateBlock:
+
+    push bp
+    mov bp, sp
+
+    push ax
+    push bx
+    push si
+
+    ; Get the tile
+    push word [bp+6]
+    push word [bp+4]
+    call GetTile
+    add sp, 4
+
+    ; Calculate tile index
+    mov bx, ax
+
+    mov ax, [bp+6]
+    shr ax, 4
+
+    mov si, MAP_COLUMNS
+    mul si
+
+    mov si, ax
+
+    mov ax, [bp+4]
+    shr ax, 4
+
+    add si, ax
+
+    ; Coin question block
+    cmp bx, TILE_QUESTION_COIN
+    je .coin_block
+
+    ; Mushroom question block
+    cmp bx, TILE_QUESTION_MUSHROOM
+    je .mushroom_block
+
+    ; Brick block
+    cmp bx, TILE_BRICK
+    je .brick_block
+
+    jmp .done
+
+
+.coin_block:
+
+    mov byte [level_map_working+si], TILE_EMPTY_BLOCK
+
+    call AddCoin
+
+    jmp .done
+
+
+.mushroom_block:
+
+    mov byte [level_map_working+si], TILE_EMPTY_BLOCK
+
+    ; Spawn mushroom above the block
+    mov ax, [bp+4]
+    and ax, 0FFF0h
+    add ax, 2
+    mov [mushroom_x], ax
+
+    mov ax, [bp+6]
+    and ax, 0FFF0h
+    sub ax, 12
+    mov [mushroom_y], ax
+
+    mov byte [mushroom_dir], 1
+    mov word [mushroom_vy], 0
+
+    mov byte [mushroom_active], 1
+
+    jmp .done
+
+
+.brick_block:
+
+    ; Only Super Mario can break bricks
+    cmp byte [hero_hp], 2
+    jne .done
+
+    mov byte [level_map_working+si], TILE_SKY
+
+    add dword [score], 50
+
+    cmp dword [score], MAX_SCORE
+    jbe .done
+
+    mov dword [score], MAX_SCORE
+
+
+.done:
+
     pop si
+    pop bx
+    pop ax
+
+    pop bp
+    ret
+
+
+
+
+; ==========================================
+; UPDATE MUSHROOM
+; ==========================================
+
+UpdateMushroom:
+
+    push ax
+    push bx
+    push dx
+
+    cmp byte [mushroom_active], 1
+    jne .done
+
+    ; Move mushroom right
+    cmp byte [mushroom_dir], 0
+    jl .move_left
+
+.move_right:
+
+    mov ax, [mushroom_x]
+    add ax, 12
+
+    mov bx, [mushroom_y]
+    add bx, 6
+
+    push bx
+    push ax
+    call CheckSolid
+    add sp, 4
+
+    cmp al, 1
+    je .turn_left
+
+    inc word [mushroom_x]
+    jmp .vertical
+
+.turn_left:
+
+    mov byte [mushroom_dir], 0FFh
+    jmp .vertical
+
+
+.move_left:
+
+    mov ax, [mushroom_x]
+    dec ax
+
+    mov bx, [mushroom_y]
+    add bx, 6
+
+    push bx
+    push ax
+    call CheckSolid
+    add sp, 4
+
+    cmp al, 1
+    je .turn_right
+
+    dec word [mushroom_x]
+    jmp .vertical
+
+.turn_right:
+
+    mov byte [mushroom_dir], 1
+
+
+.vertical:
+
+    ; Apply gravity
+    inc word [mushroom_vy]
+
+    cmp word [mushroom_vy], 3
+    jbe .apply_gravity
+
+    mov word [mushroom_vy], 3
+
+.apply_gravity:
+
+    mov ax, [mushroom_vy]
+    add [mushroom_y], ax
+
+    ; Check ground under mushroom
+    mov ax, [mushroom_x]
+    add ax, 2
+
+    mov bx, [mushroom_y]
+    add bx, 12
+
+    push bx
+    push ax
+    call CheckSolid
+    add sp, 4
+
+    cmp al, 1
+    je .landed
+
+    mov ax, [mushroom_x]
+    add ax, 10
+
+    mov bx, [mushroom_y]
+    add bx, 12
+
+    push bx
+    push ax
+    call CheckSolid
+    add sp, 4
+
+    cmp al, 1
+    jne .check_collection
+
+.landed:
+
+    mov ax, [mushroom_y]
+    add ax, 12
+    and ax, 0FFF0h
+    sub ax, 12
+
+    mov [mushroom_y], ax
+    mov word [mushroom_vy], 0
+
+
+.check_collection:
+
+    ; Remove mushroom if it falls off the level
+    cmp word [mushroom_y], 192
+    jae .remove
+
+    ; Check horizontal overlap with Mario
+    mov ax, [mushroom_x]
+    add ax, 12
+
+    cmp ax, [hero_x]
+    jbe .done
+
+    mov ax, [hero_x]
+    add ax, 16
+
+    cmp ax, [mushroom_x]
+    jbe .done
+
+    ; Check vertical overlap with Mario
+    mov ax, [mushroom_y]
+    add ax, 12
+
+    cmp ax, [hero_y]
+    jbe .done
+
+    mov ax, [hero_y]
+    add ax, 16
+
+    cmp ax, [mushroom_y]
+    jbe .done
+
+    ; Mario collects mushroom
+    mov byte [mushroom_active], 0
+
+    ; Super Mario has 2 HP
+    mov byte [hero_hp], 2
+
+    ; Add 1000 points
+    add dword [score], 1000
+
+    cmp dword [score], MAX_SCORE
+    jbe .done
+
+    mov dword [score], MAX_SCORE
+
+    jmp .done
+
+
+.remove:
+
+    mov byte [mushroom_active], 0
+
+
+.done:
+
     pop dx
     pop bx
     pop ax
 
     ret
-
 
 ; ==========================================
 ; SAVE HORIZONTAL POSITION
@@ -1865,6 +3089,9 @@ UpdateGameState:
 
     call ResetPlayer
 
+    mov word [game_time], START_TIME
+    mov word [second_ticks], 0
+
     mov byte [game_state], STATE_PLAYING
 
     mov word [state_ticks], 0
@@ -1888,6 +3115,7 @@ UpdateGameState:
     mov word [coins], 0
 
     mov word [game_time], START_TIME
+    mov word [second_ticks], 0
 
     call ResetPlayer
 
@@ -1904,31 +3132,40 @@ UpdateGameState:
 ; UPDATE CAMERA
 ; ==========================================
 
+; ==========================================
+; UPDATE CAMERA
+; ==========================================
+
 UpdateCamera:
 
     push ax
+    push bx
 
+    ; Camera follows Mario when moving right
     mov ax, [hero_x]
-
     cmp ax, 160
-    jbe .done
+    jbe .camera_zero
 
     sub ax, 160
+    jmp .check_camera_position
 
+.camera_zero:
+
+    xor ax, ax
+
+.check_camera_position:
+
+    ; Maximum camera position is 640
     cmp ax, 640
-    jbe .check_old
+    jbe .save_camera
 
     mov ax, 640
 
-.check_old:
-
-    cmp ax, [camera_x]
-    jbe .done
+.save_camera:
 
     mov [camera_x], ax
 
-.done:
-
+    pop bx
     pop ax
 
     ret
@@ -1976,6 +3213,161 @@ PrintMessage:
 
 
 ; ==========================================
+; PRINT HUD TEXT
+; SI = address of string
+; ==========================================
+
+PrintHUDText:
+
+    push ax
+    push bx
+
+.print_loop:
+
+    lodsb
+
+    cmp al, 0
+    je .done
+
+    mov ah, 0Eh
+    mov bh, 0
+    mov bl, 15
+    int 10h
+
+    jmp .print_loop
+
+.done:
+
+    pop bx
+    pop ax
+    ret
+
+
+; ==========================================
+; PRINT NUMBER
+; Input: DX:AX
+; ==========================================
+
+PrintNumber:
+
+    push ax
+    push bx
+    push cx
+    push dx
+
+    mov bx, 10
+    xor cx, cx
+
+.divide:
+
+    div bx
+    push dx
+    inc cx
+
+    xor dx, dx
+
+    cmp ax, 0
+    jne .divide
+
+.print_digits:
+
+    pop dx
+
+    mov al, dl
+    add al, '0'
+
+    mov ah, 0Eh
+    mov bh, 0
+    mov bl, 15
+    int 10h
+
+    dec cx
+    jnz .print_digits
+
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+
+    ret
+
+
+; ==========================================
+; DRAW HUD
+; ==========================================
+
+DrawHUD:
+
+    push ax
+    push dx
+    push si
+
+    ; Position HUD at top of screen
+    mov ah, 02h
+    mov bh, 0
+    mov dh, 0
+    mov dl, 0
+    int 10h
+
+    ; SCORE
+    mov si, hud_score
+    call PrintHUDText
+
+    mov ax, [score]
+    mov dx, [score+2]
+    call PrintNumber
+
+    ; COINS
+    mov si, hud_coins
+    call PrintHUDText
+
+    mov ax, [coins]
+    xor dx, dx
+    call PrintNumber
+
+    ; LIVES
+    mov si, hud_lives
+    call PrintHUDText
+
+    xor ax, ax
+    mov al, [lives]
+    xor dx, dx
+    call PrintNumber
+
+    ; TIME
+    mov si, hud_time
+    call PrintHUDText
+
+    mov ax, [game_time]
+    xor dx, dx
+    call PrintNumber
+
+    ; POWER
+    mov si, hud_power
+    call PrintHUDText
+
+    cmp byte [hero_hp], 2
+    jne .small
+
+    mov si, hud_super
+    call PrintHUDText
+    jmp .done
+
+.small:
+
+    mov si, hud_small
+    call PrintHUDText
+
+.done:
+
+    pop si
+    pop dx
+    pop ax
+
+    ret
+
+
+; ==========================================
 ; RENDER COMPLETE FRAME
 ; ==========================================
 
@@ -1989,6 +3381,8 @@ RenderFrame:
     call UpdateCamera
 
     call DrawMap
+    call DrawEnemies
+    call DrawMushroom
 
     ; Draw Mario during normal play or death
     cmp byte [game_state], STATE_PLAYING
@@ -2029,6 +3423,14 @@ RenderFrame:
 .present:
 
     call FramePresent
+
+    ; Display HUD during gameplay
+    cmp byte [game_state], STATE_PLAYING
+    jne .check_message
+
+    call DrawHUD
+
+.check_message:
 
     ; Print state message after presenting frame
     cmp byte [game_state], STATE_LIFE_LOST
